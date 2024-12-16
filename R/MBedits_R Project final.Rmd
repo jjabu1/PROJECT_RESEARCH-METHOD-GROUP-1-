@@ -1,0 +1,1249 @@
+---
+title: ''
+author: "SSOs"
+date: "2024-12-05"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r}
+#load libraries 
+library(RColorBrewer)
+library(geojsonio)
+library(tidyverse)
+library(tidycensus)
+library(leaflet)
+library(sf)
+library(units) 
+library(survey)
+library(lubridate)
+library(naniar)
+library(mice)
+library(data.table)
+library(pipebind)
+library(fuzzyjoin)
+library(ggplot2)
+library(forcats)
+library(leaflet)
+library(tigris)
+library(viridis)
+library(gridExtra)
+library(patchwork)
+library(dplyr)
+library(knitr)
+library(leaflet.extras)
+library(tidyr)
+library(httr)
+library(httr2)
+library(osmdata)
+library(sfnetworks)
+library(tidygraph)
+library(car)
+library(tidytransit)
+library(dplyr)
+
+```
+
+```{r census-api-key, echo = FALSE}
+census_api_key("9ac1cc1ce7936fa370a67b3f87d37169566116f6", overwrite = TRUE)
+```
+
+#Read shape files 
+```{r}
+#load metro station data
+transit_stations_sf <- st_as_sf(transit_stations_geojson)
+head(transit_stations_sf)
+
+#parcel data 
+parcel_shapefile <- "C:/Users/mboch/Desktop/UMD/URSP601 Research/FINAL PROJECT/R/OUTPUT/LOTS.shp"
+parcels <- st_read(parcel_shapefile)
+head(parcels)
+
+#bus stops 
+bus_stops_shapefile <- "C:/Users/mboch/Desktop/UMD/URSP601 Research/FINAL PROJECT/R/Metro_Bus_Stops (2)/Metro_Bus_Stops.shp"
+bus_stops <- st_read(bus_stops_shapefile)
+head(bus_stops)
+```
+#Enusure the data is in the crs
+```{r}
+# Ensure CRS for all datasets is WGS 84 (EPSG:4326)
+dc_tracts <- st_transform(dc_tracts, crs = 4326)  
+parcels <- st_transform(parcels, crs = 4326)
+transit_stations_sf <- st_transform(transit_stations_sf, crs = 4326)
+bus_stops <- st_transform(bus_stops, crs = 4326)
+```
+#Making the distances are in meters to be able to convert it to miles 
+```{r}
+# Transform data to EPSG:3857 for distance calculations in meters
+dc_tracts <- st_transform(dc_tracts, crs = 3857)
+parcels <- st_transform(parcels, crs = 3857)
+transit_stations_sf <- st_transform(transit_stations_sf, crs = 3857)
+bus_stops <- st_transform(bus_stops, crs = 3857)
+```
+#Calculation of distances 
+```{r}
+# Calculate distances between parcels and all metro stations
+distances_parcels_metro <- st_distance(parcels, transit_stations_sf)
+
+# Find the nearest metro station for each parcel
+parcels$nearest_metro_dist <- apply(distances_parcels_metro, 1, min)
+
+# Find the minimum distance for each parcel
+parcels$nearest_metro_dist_meters <- apply(distances_parcels_metro, 1, min)
+
+# Assign parcels to census tracts
+parcels_with_tracts <- st_join(parcels, dc_tracts, join = st_within)
+```
+
+```{r}
+# Group by census tract and calculate the average distance in miles rounded to two decimal places
+avg_distance_by_tract_metro <- parcels_with_tracts %>%
+  group_by(GEOID) %>%
+  summarize(avg_distance_metro_miles = round(mean(nearest_metro_dist, na.rm = TRUE) / 1609.34, 2))
+avg_distance_by_tract_metro
+```
+
+
+
+```{r}
+# Calculate summary statistics
+summary(avg_distance_by_tract_metro$avg_distance_metro_miles)
+
+# Calculate summary statistics
+summary_stats <- avg_distance_by_tract_metro %>%
+  summarise(
+    mean = mean(avg_distance_metro_miles, na.rm = TRUE),
+    median = median(avg_distance_metro_miles, na.rm = TRUE),
+    sd = sd(avg_distance_metro_miles, na.rm = TRUE),
+    min = min(avg_distance_metro_miles, na.rm = TRUE),
+    max = max(avg_distance_metro_miles, na.rm = TRUE),
+    q1 = quantile(avg_distance_metro_miles, 0.25, na.rm = TRUE), # 1st Quartile
+    q3 = quantile(avg_distance_metro_miles, 0.75, na.rm = TRUE)  # 3rd Quartile
+  )
+
+# View the summary statistics
+print(summary_stats)
+```
+
+
+
+```{r}
+# Calculate the mean for avg_distance_metro_miles
+mean_distance_metro <- mean(avg_distance_by_tract_metro$avg_distance_metro_miles, na.rm = TRUE)
+
+# Create a histogram to visualize the distribution
+ggplot(avg_distance_by_tract_metro, aes(x = avg_distance_metro_miles)) +
+  geom_histogram(
+    binwidth = 0.5,  # Bin width can be adjusted for better clarity
+    fill = "skyblue", 
+    color = "black",
+    alpha = 0.7
+  ) +
+  geom_vline(
+    aes(xintercept = mean_distance_metro), 
+    color = "red", 
+    linetype = "dashed", 
+    size = 1
+  ) + 
+  annotate(
+    "text", x = mean_distance_metro, y = 5, 
+    label = paste("Mean:", round(mean_distance_metro, 2)), 
+    color = "red", 
+    hjust = -0.1, size = 4
+  ) +
+  labs(
+    title = "Distribution of Average Distance to Metro",
+    x = "Average Distance to Metro (miles)",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+```
+
+
+#Save Distance to metro as CSV
+```{r}
+# Drop the geometry from the sf object
+distance_metro <- avg_distance_by_tract_metro %>%
+  st_drop_geometry() %>%  # Remove the geometry column
+  select(GEOID, avg_distance_metro_miles)  # Select the columns to save
+
+# Save the cleaned data to a CSV
+write.csv(distance_metro, "C:/Users/mboch/Desktop/UMD/URSP601 Research/FINAL PROJECT/Data/distance_metro_final.csv", row.names = FALSE)
+
+# Confirm the directory where the file is saved
+getwd()
+```
+# Reattach geometry by grouping and summarizing while keeping geometries
+```{r}
+avg_distance_by_tract_metro <- parcels_with_tracts %>%
+  group_by(GEOID) %>%
+  summarize(
+    avg_distance_metro_miles = round(mean(nearest_metro_dist, na.rm = TRUE) / 1609.34, 2),
+    geometry = st_union(geometry)  # Aggregate geometries for each group
+  ) %>%
+  st_as_sf()
+
+# Ensure both objects have the same CRS
+avg_distance_by_tract_metro <- st_transform(avg_distance_by_tract_metro, st_crs(dc_tracts))
+
+# Perform a spatial join to merge the summary data back to the tract geometries
+dc_tracts_with_distances <- st_join(dc_tracts, avg_distance_by_tract_metro, join = st_equals)
+
+# Check the result
+st_geometry_type(dc_tracts_with_distances)
+```
+```{r}
+st_crs(dc_tracts) == st_crs(avg_distance_by_tract_metro)
+
+# Drop geometry for a non-spatial join
+avg_distance_by_tract_metro_no_geom <- st_drop_geometry(avg_distance_by_tract_metro)
+
+# Use a traditional left_join
+dc_tracts_with_distances <- left_join(dc_tracts, avg_distance_by_tract_metro_no_geom, by = "GEOID")
+
+colnames(dc_tracts_with_distances)
+head(dc_tracts_with_distances)
+```
+```{r}
+# Check and transform CRS
+dc_tracts_with_distances <- st_transform(dc_tracts_with_distances, crs = 4326)
+```
+
+
+```{r}
+# Remove rows with missing values
+dc_tracts_with_distances <- dc_tracts_with_distances %>%
+  filter(!is.na(avg_distance_metro_miles))
+```
+
+
+```{r}
+dc_tracts_with_distances <- dc_tracts_with_distances %>%
+  mutate(
+    distance_category = cut(
+      avg_distance_metro_miles,
+      breaks = c(0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0),
+      labels = c("0.00-0.50", "0.50-1.00", "1.00-1.50", "1.50-2.00", "2.00-2.50", "2.50-3.00"),
+      include.lowest = TRUE
+    )
+  )
+
+
+# Define a color palette for the categories
+pal <- colorFactor(
+  palette = c("#ffffcc", "#c2e699", "#78c679", "#31a354", "#006837", "#004529"),
+  domain = dc_tracts_with_distances$distance_category
+)
+
+# Create the Leaflet map
+leaflet(dc_tracts_with_distances) %>%
+  addProviderTiles(provider = "CartoDB.Positron") %>%  # Add a base map
+  addPolygons(
+    fillColor = ~pal(distance_category), 
+    color = "white",                      
+    weight = 1,                           
+    fillOpacity = 0.7,                   
+    label = ~paste(
+      "<b>Tract ID:</b>", GEOID, "<br>",
+      "<b>Avg Distance:</b>", avg_distance_metro_miles, "miles<br>",
+      "<b>Category:</b>", distance_category
+    ),  # Add labels with tract info
+    popup = ~paste(
+      "<b>Tract ID:</b>", GEOID, "<br>",
+      "<b>Avg Distance:</b>", avg_distance_metro_miles, "miles<br>",
+      "<b>Category:</b>", distance_category
+    )  # Add popups for more details
+  ) %>%
+  addLegend(
+    pal = pal,
+    values = ~distance_category,
+    title = "Avg Distance to Metro (miles)",
+    position = "bottomright"
+  )
+```
+
+
+#CALCULATIONS FOR BUS STOPS
+```{r}
+# Find the index of the nearest bus stop for each parcel
+nearest_bus_stop_indices <- st_nearest_feature(parcels, bus_stops)
+
+# Extract the geometry of the nearest bus stops
+nearest_bus_stops <- bus_stops[nearest_bus_stop_indices, ]
+
+# Calculate the distance to the nearest bus stop for each parcel
+parcels$nearest_bus_stop_distance <- st_distance(parcels, nearest_bus_stops, by_element = TRUE)
+```
+
+```{r}
+# Assign parcels to census tracts
+parcels_with_tracts <- st_join(parcels, dc_tracts, join = st_within)
+
+
+# Calculate the average distance in miles for each census tract, without retaining units
+avg_distance_by_tract <- parcels_with_tracts %>%
+  group_by(GEOID) %>%
+  summarize(
+    avg_distance_bus_miles = round(mean(as.numeric(nearest_bus_stop_distance), na.rm = TRUE) / 1609.34, 2)
+  )
+print(avg_distance_by_tract)
+```
+
+
+```{r}
+# Calculate summary statistics for avg_distance_bus_miles
+summary(avg_distance_by_tract$avg_distance_bus_miles)
+
+# Calculate detailed summary statistics for avg_distance_bus_miles
+summary_stats_bus <- avg_distance_by_tract %>%
+  summarise(
+    mean = mean(avg_distance_bus_miles, na.rm = TRUE),
+    median = median(avg_distance_bus_miles, na.rm = TRUE),
+    sd = sd(avg_distance_bus_miles, na.rm = TRUE),
+    min = min(avg_distance_bus_miles, na.rm = TRUE),
+    max = max(avg_distance_bus_miles, na.rm = TRUE),
+    q1 = quantile(avg_distance_bus_miles, 0.25, na.rm = TRUE), # 1st Quartile
+    q3 = quantile(avg_distance_bus_miles, 0.75, na.rm = TRUE)  # 3rd Quartile
+  )
+
+# View the summary statistics
+print(summary_stats_bus)
+```
+
+
+```{r}
+# Calculate the mean for avg_distance_bus_miles
+mean_distance <- mean(avg_distance_by_tract$avg_distance_bus_miles, na.rm = TRUE)
+
+# Create a histogram with the mean indicated
+ggplot(avg_distance_by_tract, aes(x = avg_distance_bus_miles)) +
+  geom_histogram(binwidth = 0.2, fill = "skyblue", color = "black", alpha = 0.7) +  # Frequency bars
+  geom_vline(aes(xintercept = mean_distance), color = "red", linetype = "dashed", size = 1) +  # Mean line
+  annotate("text", x = mean_distance, y = 5, label = paste("Mean:", round(mean_distance, 2)),
+           color = "red", hjust = -0.1, size = 4) +  # Annotate the mean
+  labs(
+    title = "Distribution of Average Distance to Bus Stops",
+    x = "Average Distance to Bus Stops (miles)",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+```
+
+
+#SAVE DISTANCE TO BUS STOPS AS CSV
+```{r}
+# Drop the geometry from the sf object
+distance_bus <- avg_distance_by_tract %>%
+  st_drop_geometry() %>%  # Remove the geometry column
+  select(GEOID, avg_distance_bus_miles)  # Select relevant columns
+
+# Save the cleaned data to a CSV
+write.csv(distance_bus, "distance_bus.csv", row.names = FALSE)
+
+# Confirm the directory where the file is saved
+getwd()
+```
+
+```{r}
+# Ensure geometries are properly grouped
+avg_distance_by_tract <- parcels_with_tracts %>%
+  group_by(GEOID) %>%
+  summarize(
+    avg_distance_bus_miles = round(mean(as.numeric(nearest_bus_stop_distance), na.rm = TRUE) / 1609.34, 2),
+    geometry = st_union(geometry)  # Aggregate geometries for each group
+  ) %>%
+  st_as_sf()  # Convert back to sf object
+
+# Ensure both objects have the same CRS
+avg_distance_by_tract <- st_transform(avg_distance_by_tract, st_crs(dc_tracts))
+avg_distance_by_tract
+
+```
+
+```{r}
+st_crs(dc_tracts) == st_crs(avg_distance_by_tract)
+dc_tracts_with_distances <- st_join(dc_tracts, avg_distance_by_tract, join = st_intersects)
+
+# Drop geometry for a non-spatial join
+avg_distance_by_tract_no_geom <- st_drop_geometry(avg_distance_by_tract)
+
+# Perform a left join using GEOID
+dc_tracts_with_distances <- left_join(dc_tracts, avg_distance_by_tract_no_geom, by = "GEOID")
+
+head(avg_distance_by_tract)
+```
+
+```{r}
+# Perform a spatial join to merge the summary data back to the tract geometries
+dc_tracts_with_distances <- st_join(dc_tracts, avg_distance_by_tract, join = st_intersects)
+dc_tracts_with_distances
+```
+
+
+```{r}
+# Remove rows with missing values
+dc_tracts_with_distances <- dc_tracts_with_distances %>%
+  filter(!is.na(avg_distance_bus_miles))
+```
+
+```{r}
+# Ensure all spatial objects use EPSG:4326 (WGS84)
+dc_tracts_with_distances <- st_transform(dc_tracts_with_distances, crs = 4326)
+```
+
+
+
+```{r}
+# Define the categories
+breaks <- c(0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0)
+labels <- c("0.00-0.50", "0.50-1.00", "1.00-1.50", "1.50-2.00", "2.00-2.50", "2.50-3.00")
+```
+
+
+```{r}
+# Categorize distances using the specified range
+dc_tracts_with_distances <- dc_tracts_with_distances %>%
+  mutate(
+    distance_category = cut(
+      avg_distance_bus_miles,
+      breaks = c(0, 0.1, 0.2, 0.3, 0.4),
+      labels = c("0 - 0.1", "0.1 - 0.2", "0.2 - 0.3", "0.3 - 0.4"),
+      include.lowest = TRUE
+    )
+  )
+```
+
+
+
+```{r}
+# Define a "YlOrRd" color palette for the categories
+pal <- colorFactor(
+  palette = brewer.pal(4, "YlOrRd"),
+  domain = dc_tracts_with_distances$distance_category
+)
+```
+
+```{r}
+# Create the Leaflet map
+leaflet(dc_tracts_with_distances) %>%
+  addProviderTiles(provider = "CartoDB.Positron") %>%  # Add a base map
+  addPolygons(
+    fillColor = ~pal(distance_category),  # Color based on distance_category
+    color = "white",                      # Polygon border color
+    weight = 1,                           # Border thickness
+    fillOpacity = 0.7,                    # Polygon transparency
+    label = ~paste(
+      "<b>Tract ID:</b>", GEOID.x, "<br>",
+      "<b>Avg Distance:</b>", avg_distance_bus_miles, "miles<br>",
+      "<b>Category:</b>", distance_category
+    ),  # Add labels with tract info
+    popup = ~paste(
+      "<b>Tract ID:</b>", GEOID.x, "<br>",
+      "<b>Avg Distance:</b>", avg_distance_bus_miles, "miles<br>",
+      "<b>Category:</b>", distance_category
+    )  # Add popups for more details
+  ) %>%
+  addLegend(
+    pal = pal,
+    values = ~distance_category,
+    title = "Avg Distance to Bus Stop (miles)",
+    position = "bottomright"
+  )
+```
+
+
+#SECOND
+
+```{r}
+
+# Load the geojsonio package
+library(geojsonio)
+
+# Load the transit stations from GeoJSON file
+transit_stations_geojson <- geojson_read("C:/Users/mboch/Desktop/UMD/URSP601 Research/FINAL PROJECT/Data/Metro_Stations_in_DC.geojson", what = "sp")
+
+# Convert to sf object
+library(sf)
+transit_stations_sf <- st_as_sf(transit_stations_geojson)
+
+# View the data (for debugging purposes)
+head(transit_stations_sf)
+# Create a basic map
+map <- leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  setView(lng = -77.0369, lat = 38.9072, zoom = 12)
+
+# Add the transit stations as circle markers
+map <- map %>%
+  addCircleMarkers(data = transit_stations_sf, 
+                   color = "orange", 
+                   radius = 5, 
+                   popup = ~paste("Station:", NAME, "<br>Line:", LINE, "<br>Address:", ADDRESS))
+
+# Add clickable URL to the popup
+map <- map %>%
+  addCircleMarkers(data = transit_stations_sf, 
+                   color = "red", 
+                   radius = 5, 
+                   popup = ~paste("<b>Station:</b> ", NAME, 
+                                  "<br><b>Line:</b> ", LINE, 
+                                  "<br><b>Address:</b> ", ADDRESS,
+                                  "<br><a href='", WEB_URL, "' target='_blank'>Station Info</a>"))
+
+# Show the map
+map
+
+# Save the interactive map as an HTML file
+library(htmlwidgets)
+saveWidget(map, "washington_dc_transit_stations.html")
+
+
+```
+
+
+# Load population data
+
+```{r load-variables, echo = FALSE}
+all_variables <- load_variables(year = 2022, dataset = "acs5")
+total_pop <- "B01003_001"
+```
+   
+# Import population data
+
+```{r load-population-data, echo = FALSE, include = FALSE}
+#Fetch data for total population in DC by census tract
+tract_pop <- get_acs(geography = "tract",
+                     state = "DC",
+                     year = 2022,
+                     survey = "acs5", 
+                     output = "tidy",
+                     variables = total_pop,
+                     geometry = TRUE,
+                     moe_level = 95) 
+
+#Calculate area of census tract
+tract_area <- tract_pop %>%
+               mutate(area = st_area(.))
+
+# View frist few rows
+head(tract_area)
+```
+
+# Merge pop and transit station data
+```{r}
+# Transform the census tract data to match the CRS of the transit stations (if necessary)
+tract_pop_sf <- st_transform(tract_pop, crs = st_crs(transit_stations_sf))
+
+# Check if the CRS transformation worked (optional)
+st_crs(tract_pop_sf)
+st_crs(transit_stations_sf)
+```
+
+# Create leaflet map with pop and transit station data
+```{r}
+# Create the Leaflet map
+map <- leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  setView(lng = -77.0369, lat = 38.9072, zoom = 12)
+
+# Add census tracts to the map
+# Apply a color palette based on population estimates
+pal <- colorNumeric(palette = "YlGnBu", domain = tract_pop_sf$estimate)
+
+map <- map %>%
+  addPolygons(data = tract_pop_sf, 
+              fillColor = ~pal(estimate), 
+              weight = 1, 
+              opacity = 0.5, 
+              fillOpacity = 0.7,
+              popup = ~paste("Tract:", GEOID, 
+                             "<br>Population:", estimate))
+
+# Add transit stations as circle markers
+map <- map %>%
+  addCircleMarkers(data = transit_stations_sf, 
+                   color = "red",
+                   radius = 5, 
+                   popup = ~paste("<b>Station:</b> ", NAME, 
+                                  "<br><b>Line:</b> ", LINE, 
+                                  "<br><b>Address:</b> ", ADDRESS,
+                                  "<br><a href='", WEB_URL, "' target='_blank'>Station Info</a>"))
+
+# Display the map
+map
+
+# Save the interactive map as an HTML file
+library(htmlwidgets)
+saveWidget(map, "washington_dc_transit_and_population_map.html")
+
+
+```
+
+
+```{r}
+metro_distance <- read.csv("C:/Users/mboch/Desktop/UMD/URSP601 Research/FINAL PROJECT/Data/distance_metro_final.csv")
+bus_distance <- read.csv("C:/Users/mboch/Desktop/UMD/URSP601 Research/FINAL PROJECT/Data/average_bus_distance.csv")
+# Merge metro and bus distance data on the common GEOID column
+combined_distance <- merge(metro_distance, bus_distance, by = "GEOID")
+```
+
+
+```{r}
+#SVI Data
+v_score_data <- read.csv("C:/Users/mboch/Desktop/UMD/URSP601 Research/FINAL PROJECT/Data/SVI Dataset.csv")
+combined_data <- merge(combined_distance, v_score_data, by = "GEOID")
+names(combined_distance)
+names(v_score_data)
+```
+
+
+```{r}
+#Demographic Data
+# Define the ACS variable codes
+population_var <- "B01003_001"
+
+# Fetch the data for Washington, DC by census tract
+acs_data <- get_acs(
+  geography = "tract",
+  state = "DC",
+  year = 2022,
+  survey = "acs5", 
+  variables = c(population_var),
+  geometry = TRUE
+)
+```
+
+
+```{r}
+# Calculate population density (persons per square mile)
+acs_data <- acs_data %>%
+  mutate(pop_density = ifelse(variable == population_var, estimate / st_area(acs_data), NA)) %>%
+  filter(variable == population_var)
+
+# Merge the demographic data with the existing transit data by GEOID
+combined_data <- merge(combined_data, acs_data, by = "GEOID")
+
+```
+
+
+
+```{r}
+# Correlation matrix
+correlation_matrix <- combined_data %>%
+  select(avg_distance_metro_miles, avg_distance_bus_miles, EP_POV150, EP_MINRTY, F_TOTAL, pop_density) %>%
+  cor(use = "complete.obs")
+
+correlation_matrix
+```
+
+
+
+```{r}
+# Regression Model- Metro
+lm_model <- lm(avg_distance_metro_miles ~ EP_POV150 + EP_MINRTY + F_TOTAL + pop_density, data = combined_data)
+
+summary(lm_model)
+
+# Regression Model- Bus
+lm_model <- lm(avg_distance_bus_miles ~ EP_POV150 + EP_MINRTY + F_TOTAL + pop_density, data = combined_data)
+
+summary(lm_model)
+```
+
+
+```{r}
+# Check VIF for multicollinearity
+vif(lm_model)
+```
+
+
+
+
+```{r}
+# Plot residuals vs fitted values
+plot(lm_model$residuals ~ lm_model$fitted.values, main = "Residuals vs Fitted Values")
+
+# Check for normality of residuals
+hist(lm_model$residuals, main = "Histogram of Residuals", xlab = "Residuals")
+```
+
+
+```{r}
+ggplot(combined_data, aes(x = EP_POV150, y = avg_distance_metro_miles)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(title = "Relationship Between Poverty and Transit Metro Accessibility", x = "Percent Poverty", y = "Distance to Metro (miles")
+
+ggplot(combined_data, aes(x = EP_POV150, y = avg_distance_bus_miles)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(title = "Relationship Between Poverty and Transit Metro Accessibility", x = "Percent Poverty", y = "Distance to Bus Stop (miles")
+
+ggplot(combined_data, aes(x = EP_MINRTY, y = avg_distance_metro_miles)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(title = "Relationship Between Minorities and Transit Metro Accessibility", x = "Percent Minority", y = "Distance to Metro (miles")
+
+ggplot(combined_data, aes(x = EP_MINRTY, y = avg_distance_bus_miles)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(title = "Relationship Between Minorities and Transit Bus Accessibility", x = "Percent Minority", y = "Distance to Bus Stop (miles")
+```
+
+
+## 2.6 Matched-Pair Analysis Preperation
+
+### 2.6.1 Calculate Transit Accessibility scores
+
+#### OUTPUT SUMMARY
+- Demographic and transit accessibility data loaded and combined using the GEOID identifier: merged and scaled demographic variables like EP_POV150, EP_MINRTY, and pop_density; included transit access metrics (e.g., transit_access_score).
+- Scaling of demographic variables: standardized variables using the scale() function to make them comparable, which helps normalize the data for downstream analysis.
+
+```{r}
+
+# Load necessary libraries
+library(dplyr)
+library(fuzzyjoin)
+
+# Calculate transit accessibility scores
+combined_data <- combined_data %>%
+  mutate(transit_access_score = 1 / (avg_distance_metro_miles + avg_distance_bus_miles))
+
+# Normalize demographics and accessibility scores
+combined_data <- combined_data %>%
+  mutate(across(c(EP_POV150, EP_MINRTY, F_TOTAL, pop_density, transit_access_score), scale))
+
+# Fuzzy matching based on demographics
+threshold <- 0.5  # Define threshold value for matching
+
+matched_pairs <- combined_data %>%
+  fuzzy_left_join(combined_data,
+                  by = c("EP_POV150" = "EP_POV150",
+                         "EP_MINRTY" = "EP_MINRTY",
+                         "pop_density" = "pop_density"),
+                  match_fun = list(`<=`, `<=`, `<=`)) %>%
+  mutate(transit_access_score.x = as.numeric(transit_access_score.x),
+         transit_access_score.y = as.numeric(transit_access_score.y)) %>%
+  filter(abs(transit_access_score.x - transit_access_score.y) > threshold)
+
+# Inspect output for validity
+head(matched_pairs)
+
+
+```
+
+### 2.6.2 Improve Matching
+
+#### OUTPUT SUMMARY
+- Nearest neighbor matching: Matched pairs of tracts with similar demographics (EP_POV150, EP_MINRTY, pop_density). This approach ensures that the matched tracts have similar demographic characteristics, reducing confounding effects when comparing transit accessibility.
+- Filtering based on transit accessibility: After matching, filtered out pairs where the difference in transit_access_score between the tracts is smaller than the threshold, as we wanted to focus on tracts with different levels of transit accessibility.
+```{r}
+
+# Standardize demographic variables again
+combined_data <- combined_data %>%
+  mutate(across(c(EP_POV150, EP_MINRTY, pop_density, transit_access_score), scale))
+
+# Reformulate matching criteria based on specific thresholds
+matched_pairs <- combined_data %>%
+  fuzzy_left_join(combined_data,
+                  by = c("EP_POV150" = "EP_POV150",
+                         "EP_MINRTY" = "EP_MINRTY",
+                         "pop_density" = "pop_density"),
+                  match_fun = list(function(x, y) abs(x - y) < 0.1,
+                                   function(x, y) abs(x - y) < 0.1,
+                                   function(x, y) abs(x - y) < 0.05)) %>%
+  filter(abs(transit_access_score.x - transit_access_score.y) > threshold)
+
+# Perform clustering for demographic variables
+library(cluster)
+clusters <- kmeans(combined_data[, c("EP_POV150", "EP_MINRTY", "pop_density")], centers = 5)
+combined_data$cluster <- clusters$cluster
+
+# Mahalanobis distance for anomaly detection
+library(MASS)
+cov_matrix <- cov(combined_data[, c("EP_POV150", "EP_MINRTY", "pop_density")])
+combined_data$mahal_dist <- mahalanobis(combined_data[, c("EP_POV150", "EP_MINRTY", "pop_density")],
+                                        colMeans(combined_data[, c("EP_POV150", "EP_MINRTY", "pop_density")]),
+                                        cov_matrix)
+
+# Apply nearest neighbor matching using MatchIt
+install.packages(c("MatchIt"))
+library(MatchIt)
+combined_data <- combined_data %>%
+  mutate(transit_access_binary = if_else(transit_access_score > threshold, 1, 0))
+
+# Matching based on demographic variables
+match_model <- matchit(transit_access_binary ~ EP_POV150 + EP_MINRTY + pop_density,
+                       data = combined_data, method = "nearest", ratio = 1)
+
+# Visualize matching balance
+plot(match_model, type = "qq")  # Quantile-Quantile plot
+plot(match_model, type = "density")  # Density plot
+
+
+```
+
+### 2.6.3 Visualizations
+
+#### Step 1. Compare matched neighborhoods
+```{r}
+
+# Visualize matched pairs: Transit accessibility comparison
+library(ggplot2)
+ggplot(matched_pairs, aes(x = transit_access_score.x, y = transit_access_score.y)) +
+  geom_point(alpha = 0.5) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  labs(title = "Transit Accessibility Comparison Between Matched Neighborhoods",
+       x = "Transit Score (Neighborhood A)",
+       y = "Transit Score (Neighborhood B)")
+
+
+
+
+```
+#### Step 2. Pairwise conversion plot
+
+```{r}
+# Pairwise comparison plots
+pairs(matched_pairs[, c("EP_POV150.x", "EP_MINRTY.x", "pop_density.x")], 
+      main = "Pairwise Comparison of Demographics for Matched Pairs")
+
+```
+
+#### Step 3. Finalize Matching Criteria and Quality Check
+```{r}
+# Define threshold for transit accessibility
+threshold <- 1  # Adjust this value if needed
+
+# Refine matching criteria using fuzzy join
+matched_pairs <- combined_data %>%
+  fuzzy_left_join(combined_data,
+                  by = c("EP_POV150" = "EP_POV150",
+                         "EP_MINRTY" = "EP_MINRTY",
+                         "pop_density" = "pop_density"),
+                  match_fun = list(function(x, y) abs(x - y) < 0.1,
+                                   function(x, y) abs(x - y) < 0.1,
+                                   function(x, y) abs(x - y) < 0.05)) %>%
+  filter(abs(transit_access_score.x - transit_access_score.y) > threshold)
+
+# Check for redundant matches
+redundant_matches <- matched_pairs %>%
+  filter(EP_POV150.x == EP_POV150.y & 
+         EP_MINRTY.x == EP_MINRTY.y & 
+         pop_density.x == pop_density.y)
+
+# Report on redundant matches
+if (nrow(redundant_matches) > 0) {
+  message("Found redundant matches")
+} else {
+  message("No redundant matches found")
+}
+
+```
+
+#### Step 4. Map Matched Pairs
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(fuzzyjoin)
+
+# Calculate transit accessibility scores
+combined_data <- combined_data %>%
+  mutate(transit_access_score = 1 / (avg_distance_metro_miles + avg_distance_bus_miles))
+
+# Normalize demographics and accessibility scores
+combined_data <- combined_data %>%
+  mutate(across(c(EP_POV150, EP_MINRTY, F_TOTAL, pop_density, transit_access_score), scale))
+
+# Fuzzy matching based on demographics
+threshold <- 0.5  # Define threshold value for matching
+
+matched_pairs <- combined_data %>%
+  fuzzy_left_join(combined_data,
+                  by = c("EP_POV150" = "EP_POV150",
+                         "EP_MINRTY" = "EP_MINRTY",
+                         "pop_density" = "pop_density"),
+                  match_fun = list(`<=`, `<=`, `<=`)) %>%
+  mutate(transit_access_score.x = as.numeric(transit_access_score.x),
+         transit_access_score.y = as.numeric(transit_access_score.y)) %>%
+  filter(abs(transit_access_score.x - transit_access_score.y) > threshold)
+
+# Inspect output for validity
+head(matched_pairs)
+```
+
+
+```{r}
+library(tidygeocoder)
+library(dplyr)
+library(sf)
+library(sp)
+library(fuzzyjoin)
+
+# Ensure matched_pairs has valid addresses
+valid_locations <- matched_pairs %>%
+  filter(!is.na(LOCATION.x) & LOCATION.x != "")
+
+# Convert LOCATION.x to a character vector explicitly
+valid_locations$LOCATION.x <- as.character(valid_locations$LOCATION.x)
+
+# Test a single address to ensure geocoding works for one address
+geocode(valid_locations$LOCATION.x[1], method = "osm")
+
+# Now perform geocoding on the entire list of valid addresses
+geocoded_results <- geocode(valid_locations$LOCATION.x, method = "osm")
+
+# Add geocoding results back to the original data frame
+valid_locations <- valid_locations %>%
+  bind_cols(geocoded_results)
+
+# Remove rows with missing lat/long values
+matched_pairs_clean <- valid_locations %>%
+  filter(!is.na(lat) & !is.na(long))
+
+# Convert to spatial object
+matched_pairs_sf <- st_as_sf(matched_pairs_clean, coords = c("lat", "long"), crs = 4326)
+
+# Visualize the geocoded data on a map
+library(leaflet)
+
+leaflet(matched_pairs_sf) %>%
+  addTiles() %>%
+  addCircleMarkers(
+    radius = 5,
+    color = "blue",
+    fill = TRUE,
+    fillColor = "blue",
+    fillOpacity = 0.5,
+    popup = ~paste("Location: ", LOCATION.x)
+  ) %>%
+  setView(lng = -77.0369, lat = 38.9072, zoom = 12)
+```
+
+```{r}
+#Sensitivity Analysis
+
+# Merge metro and bus distance data on the common GEOID column
+combined_distance <- merge(metro_distance, bus_distance, by = "GEOID")
+combined_data <- merge(combined_distance, v_score_data, by = "GEOID")
+
+walking_distance_mile <- c(0.2083, 0.4167)
+
+combined_data <- combined_data %>%
+  mutate(
+    train_walking_category = case_when(
+      avg_distance_metro_miles <= walking_distance_mile[1] ~ "0-5 minutes",
+      avg_distance_metro_miles <= walking_distance_mile[2] ~ "6-10 minutes",
+      avg_distance_metro_miles > walking_distance_mile[2] ~ "10+ minutes"),
+
+bus_walking_category = case_when(
+    avg_distance_bus_miles <= walking_distance_mile[1] ~ "0-5 minutes",  
+    avg_distance_bus_miles <= walking_distance_mile[2] ~ "6-10 minutes", 
+      avg_distance_bus_miles > walking_distance_mile[2] ~ "10+ minutes"))
+
+station_accessibility_df <- combined_data %>%
+count(train_walking_category, bus_walking_category)
+
+print(station_accessibility_df)
+
+#example map
+
+library(leaflet)
+library(dplyr)
+library(sf)
+
+# Create the Leaflet map
+minute_map <- leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  setView(lng = -77.0369, lat = 38.9072, zoom = 12)
+
+# Define walking time thresholds in miles (5-minute = 0.2083 miles, 10-minute = 0.4167 miles)
+walking_time_distances <- c(0.2083, 0.4167)  # 5-minute and 10-minute walk distances in miles
+
+# Convert walking time distances from miles to meters (1 mile = 1609.34 meters)
+walking_time_distances_meters <- walking_time_distances * 1609.34
+
+# **Create Buffers**: 5-minute and 10-minute walking areas around each station
+# Assuming 'transit_stations_sf' is an sf object with 'latitude' and 'longitude' for stations
+buffer_5min <- st_buffer(transit_stations_sf, dist = walking_time_distances_meters[1])  # 5-minute buffer in meters
+buffer_10min <- st_buffer(transit_stations_sf, dist = walking_time_distances_meters[2])  # 10-minute buffer in meters
+
+# Add census tracts to the map (if needed, otherwise skip this part)
+pal <- colorNumeric(palette = "YlGnBu", domain = tract_pop_sf$estimate)
+
+minute_map <- minute_map %>%
+addPolygons(data = tract_pop_sf, fillColor = ~pal(estimate), weight = 1, opacity = 0.5, fillOpacity = 0.7, popup = ~paste("Tract:", GEOID, "<br>Population:", estimate))
+
+minute_map <- minute_map %>% addPolygons(data = buffer_5min, color = "orange", opacity = 0.3, fillOpacity = 0.1, label = "5-minute walk buffer") %>%
+addPolygons(data = buffer_10min, color = "green", opacity = 0.3,fillOpacity = 0.1, label = "10-minute walk buffer")
+
+minute_map <- minute_map %>%
+addCircleMarkers(data = transit_stations_sf, color = "red",radius = 5, popup = ~paste(
+  "<b>Station:</b> ", NAME, 
+  "<br><b>Line:</b> ", LINE, 
+  "<br><b>Address:</b> ", ADDRESS,
+  "<br><a href='", WEB_URL, "' target='_blank'>Station Info</a>"))
+
+minute_map
+```
+
+```{r}
+# Install and load the tidytransit package
+
+library(tidytransit)
+
+# Read the GTFS data
+gtfs_data <- read_gtfs("C:/Users/mboch/Desktop/UMD/URSP601 Research/FINAL PROJECT/Data/GTFS/gtfs_data.zip")
+
+# View the content of the GTFS data (you can examine other files too)
+head(gtfs_data$stop_times)
+head(gtfs_data$trips)
+```
+
+##Peak Vs Off-Peak Hours
+
+```{r}
+# Convert departure_time to POSIXct format (time format: "HH:MM:SS")
+gtfs_data$stop_times$departure_time <- as.POSIXct(gtfs_data$stop_times$departure_time, format="%H:%M:%S", tz="UTC")
+
+
+# Define peak hours (7:00 AM to 9:00 AM and 4:00 PM to 6:00 PM)
+peak_hours <- (gtfs_data$stop_times$departure_time >= as.POSIXct("07:00:00", format="%H:%M:%S", tz="UTC") & 
+               gtfs_data$stop_times$departure_time <= as.POSIXct("09:00:00", format="%H:%M:%S", tz="UTC")) |
+              (gtfs_data$stop_times$departure_time >= as.POSIXct("16:00:00", format="%H:%M:%S", tz="UTC") & 
+               gtfs_data$stop_times$departure_time <= as.POSIXct("18:00:00", format="%H:%M:%S", tz="UTC"))
+
+# Add a column to classify time periods (Peak vs Non-Peak)
+gtfs_data$stop_times$time_period <- ifelse(peak_hours, "Peak", "Non-Peak")
+
+# Check the first few rows to verify
+head(gtfs_data$stop_times)
+```
+
+#Transit Frequency by Time Period
+
+```{r}
+# Count the number of trips during peak and non-peak hours for each stop
+transit_frequency <- gtfs_data$stop_times %>%
+  group_by(stop_id, time_period) %>%
+  summarize(trip_count = n())
+
+# View the frequency data
+head(transit_frequency)
+```
+
+#Non-Standard Work Hours
+
+```{r}
+# Fetch data for non-standard work hours (e.g., variable for workers with evening shifts, overnight shifts)
+# Example: Using the ACS variable for workers in non-standard hours (make sure to replace with the correct variable)
+library(tidycensus)
+acs_data <- get_acs(
+  geography = "tract",
+  state = "DC",
+  year = 2022,
+  survey = "acs5", 
+  variables = c("B23025_004"),  # Example variable for workers in non-standard hours (evenings, nights)
+  geometry = TRUE
+)
+
+# View the data
+head(acs_data)
+```
+
+```{r}
+# Create an sf object from stop coordinates (latitude and longitude)
+stops_sf <- st_as_sf(gtfs_data$stops, coords = c("stop_lon", "stop_lat"), crs = 4326)
+
+# Perform geocoding to assign each stop to a census tract (GEOID)
+
+# Perform spatial join to assign each stop to a neighborhood (GEOID)
+stops_with_geo <- st_join(stops_sf, tract_pop_sf)
+
+# View the resulting data
+head(stops_with_geo)
+
+# Merge transit frequency with stops data (now with GEOID)
+transit_with_geo <- merge(transit_frequency, stops_with_geo, by = "stop_id")
+
+# Now merge with the ACS data based on GEOID
+merged_data <- merge(transit_with_geo, acs_data, by = "GEOID")
+
+# View the merged data
+head(merged_data)
+```
+
+```{r}
+# Calculate the average number of trips per neighborhood
+accessibility_by_non_standard_hours <- merged_data %>%
+  group_by(GEOID) %>%
+  summarize(
+    avg_trip_count = mean(trip_count, na.rm = TRUE),  # Average trip count per neighborhood
+    high_non_standard_hours = mean(estimate.y, na.rm = TRUE)  # Average non-standard work hours (estimate.y)
+  )
+
+# View the results
+head(accessibility_by_non_standard_hours)
+```
+
+```{r}
+# Extract the latitude and longitude from the geometry column
+stops_with_geo <- stops_with_geo %>%
+  mutate(
+    longitude = st_coordinates(geometry)[, 1],  # Extract longitude (first column)
+    latitude = st_coordinates(geometry)[, 2]    # Extract latitude (second column)
+  )
+
+# Check the first few rows to verify the new latitude and longitude columns
+head(stops_with_geo)
+
+# Merge the transit frequency with stops data, ensuring we include latitude and longitude
+transit_with_geo <- merge(transit_frequency, stops_with_geo, by = "stop_id")
+
+# View the merged data to check if latitude and longitude are present
+head(transit_with_geo)
+
+# Merge with ACS data using GEOID
+merged_data <- merge(transit_with_geo, acs_data, by = "GEOID")
+
+# Check the resulting merged data
+head(merged_data)
+
+# Calculate the average number of trips per neighborhood without reducing the dataset
+avg_trip_count_per_neighborhood <- merged_data %>%
+  group_by(GEOID) %>%
+  summarize(
+    avg_trip_count = mean(trip_count, na.rm = TRUE),  # Average trip count per neighborhood
+    high_non_standard_hours = mean(estimate.y, na.rm = TRUE)  # Average non-standard work hours (estimate.y)
+  )
+
+# View the results
+head(avg_trip_count_per_neighborhood)
+
+# Join the calculated averages back into the original data
+merged_data_with_avg <- left_join(merged_data, avg_trip_count_per_neighborhood, by = "GEOID")
+
+# View the resulting data to ensure it includes latitude, longitude, and avg_trip_count
+head(merged_data_with_avg)
+
+leaflet(merged_data_with_avg) %>%
+  addTiles() %>%
+  addCircleMarkers(
+    lat = ~latitude,   # Explicitly set the latitude column
+    lng = ~longitude,  # Explicitly set the longitude column
+    radius = ~avg_trip_count_per_neighborhood,  # Size the markers based on the average trip count
+    color = "blue",
+    fill = TRUE,
+    fillOpacity = 0.5,
+    popup = ~paste("Neighborhood: ", GEOID, "<br>Avg. Trip Count: ", avg_trip_count_per_neighborhood)
+  ) %>%
+  setView(lng = -77.0369, lat = 38.9072, zoom = 12)  
+```
+
+```{r}
+library(ggplot2)
+# Bar plot of average transit accessibility for non-standard work hours
+ggplot(accessibility_by_non_standard_hours, aes(x = GEOID, y = avg_trip_count)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Transit Accessibility by Neighborhood (Non-Standard Work Hours)", 
+       x = "GEOID", y = "Average Trip Count") +
+  theme_minimal()
+```
+
+##Cluster Analysis
+
+```{r}
+colnames(combined_data)
+
+str(combined_data)
+
+# Create population density column (population per square mile)
+combined_data <- combined_data %>%
+  mutate(pop_density = E_TOTPOP / AREA_SQMI)
+
+# Calculate transit accessibility score (1 / distance)
+combined_data <- combined_data %>%
+  mutate(transit_access_score = 1 / (avg_distance_metro_miles + avg_distance_bus_miles))
+
+# Ensure all necessary columns exist in the dataset
+clustering_data <- dplyr::select(combined_data, transit_access_score, EP_POV150, EP_MINRTY, pop_density)
+
+# Scale the data for clustering
+clustering_data_scaled <- scale(clustering_data)
+
+# Perform k-means clustering
+set.seed(123)
+kmeans_result <- kmeans(clustering_data_scaled, centers = 3)
+
+# Add the cluster assignment to the dataset
+combined_data$cluster <- as.factor(kmeans_result$cluster)
+
+# Check the resulting clusters
+table(combined_data$cluster)
+```
+
+
+##REgression Analysis 2
+
+```{r}
+# Fit a linear regression model with transit_access_score as the dependent variable
+lm_model <- lm(transit_access_score ~ EP_POV150 + EP_MINRTY + pop_density, data = combined_data)
+
+# Summary of the model to assess significance
+summary(lm_model)
+```
+
+```{r}
+# Check VIF for multicollinearity
+library(car)
+vif(lm_model)
+```
+
+```{r}
+# Residuals vs fitted values plot
+plot(lm_model$residuals ~ lm_model$fitted.values, main = "Residuals vs Fitted Values")
+
+# Histogram of residuals to check for normality
+hist(lm_model$residuals, main = "Histogram of Residuals", xlab = "Residuals")
+```
+
+```{r}
+# Relationship between poverty rate and transit accessibility score
+ggplot(combined_data, aes(x = EP_POV150, y = transit_access_score)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(title = "Relationship Between Poverty and Transit Accessibility",
+       x = "Poverty Rate (%)", 
+       y = "Transit Accessibility Score")
+```
+
+```{r}
+# Example of adding interaction terms
+lm_interaction_model <- lm(transit_access_score ~ EP_POV150 * EP_MINRTY + pop_density, data = combined_data)
+
+# Summary of the interaction model
+summary(lm_interaction_model)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
